@@ -1,6 +1,7 @@
 import time
 import torch.utils.data
 from networks import ObjectDetection_SSD, LossFunction
+from data import dataset , DataLoader
 import argparse
 
 def get_opt():
@@ -22,7 +23,7 @@ def train(model , opt , train_loader):
     model.train()
 
     # criterion
-    box = model.create_boxes()
+    box = model.create_prior_boxes()
     criterion = LossFunction(box)
     
     # optimizer
@@ -55,8 +56,8 @@ def train(model , opt , train_loader):
 
 def main():
     opt = get_opt()
-    train_dataset = CPDataset(opt)
-    train_loader = CPDataLoader(opt, train_dataset)
+    train_dataset = dataset(opt)
+    train_loader = DataLoader(opt, train_dataset)
 
     model = ObjectDetection_SSD(nbr_classes = opt.nbr_classes)
 
