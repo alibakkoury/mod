@@ -1,8 +1,8 @@
 import time
 import torch.utils.data
 from networks import ObjectDetection_SSD, LossFunction
-from data import dataset , DataLoader
 import argparse
+import os 
 
 def get_opt():
     parser = argparse.ArgumentParser()
@@ -13,7 +13,9 @@ def get_opt():
     parser.add_argument("--display_count" , default = 100)
     parser.add_argument("--nbr_classes" , default = 500)
     parser.add_argument("--checkpoint" , default = 50000)
-    parser.add_argument("--checkpoint_dir" , default = "checkpoints")
+    parser.add_argument("--checkpoint_dir" , default = 'checkpoints')
+    parser.add_argument("--traindata_dir" , default = 'data/train/')
+    
     opt = parser.parse_args()
     return opt
 
@@ -23,11 +25,13 @@ def train(model , opt , train_loader):
     model.train()
 
     # criterion
-    box = model.create_prior_boxes()
+    box = model.create_boxes()
     criterion = LossFunction(box)
     
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, betas=(0.5, 0.999))
+    
+    os.mkdir(opt.checkpoint_dir)
     
     for epoch in range(opt.nb_epochs):
         iter_start_time = time.time()
@@ -56,8 +60,8 @@ def train(model , opt , train_loader):
 
 def main():
     opt = get_opt()
-    train_dataset = dataset(opt)
-    train_loader = DataLoader(opt, train_dataset)
+    train_dataset = CPDataset(opt)
+    train_loader = CPDataLoader(opt, train_dataset)
 
     model = ObjectDetection_SSD(nbr_classes = opt.nbr_classes)
 
