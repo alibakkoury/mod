@@ -19,6 +19,7 @@ from math import sqrt
 import torchvision
 
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model_urls = {
     'vgg11': 'https://download.pytorch.org/models/vgg11-bbd30ac9.pth',
@@ -192,14 +193,14 @@ class ClassificationNet(nn.Module):
             self.cla_conv2 = nn.Conv2d(1024, 6 * nbr_classes, 3, 1, 1)
             self.cla_conv3 = nn.Conv2d(512, 6 * nbr_classes, 3, 1, 1)
             self.cla_conv4 = nn.Conv2d(256, 6 * nbr_classes, 3, 1, 1)
-            self.cla_conv5 = nn.Conv2d(256, 6 * nbr_classes, 3, 1, 1)
-            self.cla_conv6 = nn.Conv2d(256, 6 * nbr_classes, 3, 1, 1)
+            self.cla_conv5 = nn.Conv2d(256, 4 * nbr_classes, 3, 1, 1)
+            self.cla_conv6 = nn.Conv2d(256, 4 * nbr_classes, 3, 1, 1)
 
             self.nbr_classes = nbr_classes
 
         def conv_and_organize(self ,features, conv, output_width):
             batch_size = features.size(0)
-            print(batch_size)
+            #print(batch_size)
             res = conv(features)
             res = res.permute(0, 2, 3, 1).contiguous()
             res = res.view(batch_size, -1, output_width)
@@ -258,7 +259,7 @@ def gcxgcy_to_cxcy(gcxgcy, priors_cxcy):
 class ObjectDetection_SSD(nn.Module):
   def __init__(self, nbr_classes = 1000): #Initialisation du système SSD
     
-    super(ObjectDetextion_SSD, self).__init__() 
+    super(ObjectDetection_SSD, self).__init__() 
 
     self.cnn = vgg16(nbr_classes )  #Base du réseau VGG16, sans la partie Dense, renvoie la sortie de 2 layers
     self.box = BoxRegressionNet()  #Réseau de génération des rectangles (Regression)
@@ -473,6 +474,32 @@ class ObjectDetection_SSD(nn.Module):
 
     return res_boxes , res_scores , res_labels
 
+def find_jaccard_overlap(set_1, set_2):
+    # Find intersections
+    intersection = find_intersection(set_1, set_2)# (n1, n2)
+    intersection.cpu()
+
+    # Find areas of each box in both sets
+    areas_set_1 = (set_1[:, 2] - set_1[:, 0]) * (set_1[:, 3] - set_1[:, 1])  # (n1)
+    areas_set_2 = (set_2[:, 2] - set_2[:, 0]) * (set_2[:, 3] - set_2[:, 1])  # (n2)
+    
+    areas_set_1.cpu()
+    areas_set_2.cpu()
+
+    # Find the union
+    # PyTorch auto-broadcasts singleton dimensions
+    union = (areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection).cpu()  # (n1, n2)
+
+    return intersection / union  # (n1, n2)
+    
+def find_intersection(set_1, set_2):
+    set_1.cpu()
+    set_2.cpu()
+    # PyTorch auto-broadcasts singleton dimensions
+    lower_bounds = torch.max(set_1[:, :2].cpu().unsqueeze(1), set_2[:, :2].cpu().unsqueeze(0))  # (n1, n2, 2)
+    upper_bounds = torch.min(set_1[:, 2:].unsqueeze(1), set_2[:, 2:].cpu().unsqueeze(0))  # (n1, n2, 2)
+    intersection_dims = torch.clamp(upper_bounds - lower_bounds, min=0)  # (n1, n2, 2)
+    return intersection_dims[:, :, 0] * intersection_dims[:, :, 1]  # (n1, n2)
 
 class LossFunction(nn.Module):
     """
@@ -494,18 +521,25 @@ class LossFunction(nn.Module):
 
     def forward(self, predicted_locs, predicted_scores, boxes, labels):
         
+        #boxes = list(boxes)
+        #labels = list(labels)
+        
         batch_size = predicted_locs.size(0)
         nbr_priors = self.priors_cxcy.size(0)
+        print('predicted_scores' , predicted_scores.size())
+        print('nbr_priors' , nbr_priors)
         nbr_classes = predicted_scores.size(2)
+        
 
 
         ground_truth_locs = torch.zeros((batch_size, nbr_priors, 4)).float().cuda()  
         ground_truth_classes = torch.zeros((batch_size, nbr_priors)).cuda()
+        print(ground_truth_classes.size())
 
         for i in range(batch_size):
             nbr_boxes = boxes[i].size(0)
 
-            overlap = IoU(boxes[i], self.priors_xy)
+            overlap = find_jaccard_overlap(boxes[i], self.priors_xy)
 
             # on identifie pour chaque prior la boxe qui lui correspond le plus
             prior_max_overlap_value, prior_max_overlap_box = overlap.max(dim=0)
@@ -513,7 +547,7 @@ class LossFunction(nn.Module):
             # on veut que chaque boxe soit associée a au moins un prior positif (IoU>=seuil)
             # on va donc pour chaque boxe choisir le prior qui lui correspond le plus et les associer avec un IoU arbitraire fixé au seuil  
             box_max_overlap_value, box_max_overlap_prior = overlap.max(dim=1)
-            prior_max_overlap_box[box_max_overlap_prior] = torch.Tensor(range(nbr_boxes)).cuda()
+            prior_max_overlap_box[box_max_overlap_prior] = torch.LongTensor(range(nbr_boxes))
             prior_max_overlap_value[box_max_overlap_prior] = self.threshold
 
             # on associe a chaque prior le label de la boxe qui lui correspond
@@ -523,20 +557,31 @@ class LossFunction(nn.Module):
 
             ground_truth_classes[i] = prior_max_overlap_label
             ground_truth_locs[i] = cxcy_to_gcxgcy(xy_to_cxcy(boxes[i][prior_max_overlap_box]), self.priors_cxcy) 
+        ground_truth_locs.cuda()    
+        ground_truth_classes.cuda()
+            
+        
 
-        positive_priors = true_classes != 0 
+        positive_priors = ground_truth_classes != 0
 
         # LOCALIZATION LOSS
 
-        loc_loss = self.smooth_l1(predicted_locs[positive_priors], true_locs[positive_priors])
+        loc_loss = self.l1Loss(predicted_locs[positive_priors], ground_truth_locs[positive_priors])
 
         # CONFIDENCE LOSS
 
         nbr_positives = positive_priors.sum(dim=1)
-        nbr_hard_negatives = self.neg_pos_ratio * n_positives
+        nbr_hard_negatives = self.neg_pos_ratio * nbr_positives
+        
+        print(predicted_scores.view(-1, nbr_classes).size())
+        print(ground_truth_classes.view(-1).size())
+        
 
-        conf_loss_all = self.CELoss(predicted_scores.view(-1, n_classes), true_classes.view(-1))  
-        conf_loss_all = conf_loss_all.view(batch_size, n_priors)  
+        conf_loss_all = self.CELoss(predicted_scores.view(-1, nbr_classes).float().cuda(), ground_truth_classes.view(-1).long()).cuda()  
+        conf_loss_all = conf_loss_all.view(batch_size, nbr_priors).cpu()
+        print(positive_priors.size())
+        
+        
 
         conf_loss_pos = conf_loss_all[positive_priors]
 
@@ -544,12 +589,14 @@ class LossFunction(nn.Module):
         conf_loss_neg[positive_priors] = 0.
         conf_loss_neg, _ = conf_loss_neg.sort(dim=1, descending=True)
 
-        hardness_ranks = torch.Tensor(range(n_priors)).unsqueeze(0).expand_as(conf_loss_neg).cuda()
-        hard_negatives = hardness_ranks < n_hard_negatives.unsqueeze(1)
+        hardness_ranks = torch.Tensor(range(nbr_priors)).unsqueeze(0).expand_as(conf_loss_neg).cuda()
+        hard_negatives = hardness_ranks < nbr_hard_negatives.unsqueeze(1)
         conf_loss_hard_neg = conf_loss_neg[hard_negatives]
 
         conf_loss = (conf_loss_hard_neg.sum() + conf_loss_pos.sum()) / nbr_positives.sum()
+        conf_loss.cuda()
 
         multiboxloss = conf_loss + self.alpha * loc_loss
 
         return multiboxloss
+
