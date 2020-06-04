@@ -32,6 +32,7 @@ class Dataset():
         data = self.coco.__getitem__(i)
         m = len(data[1])
         img = data[0][:]
+        print(img.size())
         p , w , h = img.size()
         t = torch.tensor([1/h , 1/w , 1/h , 1/w])
         for k in range(m):
@@ -67,15 +68,14 @@ class Dataset():
 
         return img , boxes , labels
     
-        
+    #commentaire   
     def collate_fn(self, batch):
     
         images = list()
         boxes = list()
         labels = list()
-        difficulties = list()
-
-        for b in batch:
+        
+        for  b in batch:
             images.append(b[0])
             boxes.append(b[1])
             labels.append(b[2])

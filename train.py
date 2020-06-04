@@ -1,11 +1,12 @@
 import time
 import torch.utils.data
-from networks import ObjectDetection_SSD, LossFunction
+from networks import ObjectDetection_SSD, LossFunction, default_boxes
 from data import DataLoader , Dataset
 import argparse
 import os 
 import torchvision
 import cv2
+import numpy as np
 
 from tensorboardX import SummaryWriter
 from visualization import board_add_image, board_add_images
@@ -13,17 +14,75 @@ from visualization import board_add_image, board_add_images
 def get_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default = "SSD300")
-    parser.add_argument("--batch_size", default = 20)
+    parser.add_argument("--batch_size", default = 8)
     parser.add_argument("--nb_epochs" , default = 10000)
     parser.add_argument("--lr" , default = 0.0001)
-    parser.add_argument("--display_count" , default = 10)
+    parser.add_argument("--display_count" , default = 5)
     parser.add_argument("--nbr_classes" , default = 91)
-    parser.add_argument("--checkpoint" , default = 50000)
+    parser.add_argument("--checkpoint" , default = 5000)
     parser.add_argument("--checkpoint_dir" , default = 'checkpoints')
     parser.add_argument("--traindata_dir" , default = 'data/train/')
     
     opt = parser.parse_args()
     return opt
+
+topil = torchvision.transforms.ToPILImage()
+totensor = torchvision.transforms.ToTensor()
+
+
+
+    
+def IoU(rect1,rect2):
+  """ 
+  Renvoie un float avec le IoU entre rect1 et rect2 :
+  rect1, rect2 : quadruplets (x,y,w,h) 
+  """
+  x1,y1,w1,h1 = rect1
+  x2,y2,w2,h2 = rect2
+  xA,yA = max(x1,x2),max(y1,y2)
+  xB,yB = min(x1+w1,x2+w2),min(y1+h1,y2+h2)
+  inter = max(0,xB - xA)*max(0,yB-yA)
+  union = w1*h1 + w2*h2 - inter
+  return inter/union
+
+def get_labeled_boxes(predicted_boxes , predicted_scores ,threshold=.5,iou=0.4):
+    boxes = [] 
+    scores = []
+    labels = []
+    rects = predicted_boxes
+    preds = predicted_scores
+    n = len(rects)
+    for i in range(n) : 
+        cx , cy , w , h = rects[i]*300
+        x , y = cx-w/2 , cy-h/2
+        if (preds[i].max().item() > threshold):
+            cond = True
+            k = len(boxes)
+            for l in range(k) :
+                if (IoU(boxes[l] , (x,y,w,h)) > iou) and labels[l]==predicted_scores[i].argmax():
+                    cond = False
+                    break
+            if cond : 
+                boxes.append((x,y,w,h))
+                labels.append(predicted_scores[i].argmax().item())
+                scores.append(predicted_scores[i].max().item())
+    return boxes, scores, labels
+
+
+def showrects(img,rects,maxRect=3000):
+    imag = img.cpu()
+    imag = topil(imag)
+    print(imag.size)
+    imOut = cv2.cvtColor(np.float32(imag),cv2.COLOR_RGB2BGR)
+    for i,rect in enumerate(rects):
+        if (i < maxRect):
+            x, y, w, h = rect
+            cv2.rectangle(imOut, (int(x), int(y)), (int(x+w), int(y+h)), (0, 0, 255), 2, cv2.LINE_AA)
+    
+    image = imOut
+    imOut = totensor(imOut).view((1,3,300,300))
+    print("Done")
+    return imOut , image
 
 
 def show_objs(img ,boxes, scores , labels):
@@ -47,7 +106,7 @@ def show_objs(img ,boxes, scores , labels):
     
 
 
-def train(model , opt , train_loader):
+def train(model , opt , train_loader , board):
     
     print("Training ...")
     
@@ -55,7 +114,7 @@ def train(model , opt , train_loader):
     model.train()
 
     # criterion
-    box = model.create_boxes()
+    box = default_boxes()
     criterion = LossFunction(box).cuda()
     
     # optimizer
@@ -79,6 +138,7 @@ def train(model , opt , train_loader):
         predicted_boxes , predicted_scores = model(img)
         
         loss = criterion(predicted_boxes , predicted_scores , boxes , labels)
+        #print('LOSS' , loss.item())
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -95,44 +155,29 @@ def train(model , opt , train_loader):
             model.cuda()
        
         if (epoch+1) % opt.display_count == 0:
-            boxes , scores , labels = model.detect_objects(predicted_boxes , predicted_scores , 0.01 , 0.45 , 200)
-            if len(boxes)>4:
-                img_1 = img[0]
-                img_2 = img[1]
-                img_3 = img[2]
-                img_4 = img[3]
+            board.add_scalar('metric', loss.item(), epoch+1)
+            
+            #image = img[0] 
+            #box = boxes[0]
+            #score = scores[0]
+            #label = labels[0]
                 
+            #image_1 = show_objs(img_1 , boxes_1 , scores_1 , labels_1).squeeze()
                 
-                boxes_1 = boxes[0]
-                boxes_2 = boxes[1]
-                boxes_3 = boxes[2]
-                boxes_4 = boxes[3]
+            #print(image_1.size())
+            
+            boxes , scores , labels = get_labeled_boxes(predicted_boxes[0] , predicted_scores[0] , threshold = 0.5,iou=0.5)    
+            image , imOut = showrects(img[0] , boxes)   
+            
+            board_add_image(board, 'combine',image, epoch+1)
+            string = 'images/step' + str(epoch) + 'jpg'
+            cv2.imwrite('test.jpg' , imOut)
+            
+            t = time.time() - iter_start_time
+            print('step: %8d, time: %.3f, loss: %4f' % (epoch+1, t, loss.item()), flush=True)
                 
-                scores_1 = scores[0]
-                scores_2 = scores[1]
-                scores_3 = scores[2]
-                scores_4 = scores[3]
-                
-                labels_1 = labels[0]
-                labels_2 = labels[1]
-                labels_3 = labels[2]
-                labels_4 = labels[3]
-                
-                image_1 = show_objs(img_1 , boxes_1 , scores_1 , labels_1).squeeze()
-                image_2 = show_objs(img_2 , boxes_2 , scores_2 , labels_2).squeeze()
-                image_3 = show_objs(img_3 , boxes_3 , scores_3 , labels_3).squeeze()
-                image_4 = show_objs(img_4 , boxes_4 , scores_4 , labels_4).squeeze()
-                
-                
-                visuals = torch.cat([image_1 , image_2 , image_3 , image_4])
-                
-                board_add_images(board, 'combine', visuals, step+1)
-                board.add_scalar('metric', loss.item(), step+1)
-                t = time.time() - iter_start_time
-                print('step: %8d, time: %.3f, loss: %4f' % (step+1, t, loss.item()), flush=True)
-                
-                image_1 = image_1.numpy()
-                cv2.imwrite('test/step_%.jpg'%(epoch) , image_1)
+            #image_1 = image_1.numpy()
+            #cv2.imwrite('test/step_%.jpg'%(epoch) , image_1)
                 
                 
 def main():
@@ -153,11 +198,14 @@ def main():
     
     start = time.time()
 
-    train(model , opt , train_loader)
+    train(model , opt , train_loader , board)
     
     end = time.time()
     
     duree = end-start
+    
+    torch.save(model.cpu().state_dict(), 'model.pth')
+    
     print('Finished training in' , duree)
 
 main()

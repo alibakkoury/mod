@@ -19,13 +19,13 @@ from math import sqrt
 import torchvision
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 model_urls = {
     'vgg11': 'https://download.pytorch.org/models/vgg11-bbd30ac9.pth',
     'vgg16': 'https://download.pytorch.org/models/vgg16-397923af.pth',
     'vgg16_bn' : 'https://download.pytorch.org/models/vgg16_bn-6c64b313.pth'
 }
+
+
 
 
 class VGG(nn.Module): #Réseau VGG tronqué et modifié 
@@ -237,8 +237,8 @@ def xy_to_cxcy(xy):
     :param xy: bounding boxes in boundary coordinates, a tensor of size (n_boxes, 4)
     :return: bounding boxes in center-size coordinates, a tensor of size (n_boxes, 4)
     """
-    return torch.cat([(xy[:, 2:] + xy[:, :2]) / 2,  # c_x, c_y
-                      xy[:, 2:] - xy[:, :2]], 1)  # w, h
+    return torch.cat([xy[:, :2] + xy[:, 2:] / 2,  # c_x, c_y
+                      xy[:, 2:]], 1)  # w, h
 
 
 def cxcy_to_xy(cxcy):
@@ -246,15 +246,38 @@ def cxcy_to_xy(cxcy):
                       cxcy[:, :2] + (cxcy[:, 2:] / 2)], 1)  # x_max, y_max
 
 
-def cxcy_to_gcxgcy(cxcy, priors_cxcy):
-    return torch.cat([(cxcy[:, :2] - priors_cxcy[:, :2]) / (priors_cxcy[:, 2:] / 10),  # g_c_x, g_c_y
-                      torch.log(cxcy[:, 2:] / priors_cxcy[:, 2:]) * 5], 1)  # g_w, g_h
 
 
 def gcxgcy_to_cxcy(gcxgcy, priors_cxcy):
     return torch.cat([gcxgcy[:, :2] * priors_cxcy[:, 2:] / 10 + priors_cxcy[:, :2],  # c_x, c_y
                       torch.exp(gcxgcy[:, 2:] / 5) * priors_cxcy[:, 2:]], 1)  # w, h
 
+
+sizes = [38 , 19 , 10 , 5 , 3 , 1]
+ech = [0.1 , 0.2 , 0.375 , 0.55 , 0.725 , 0.9]
+dilatations = [[1., 2., 0.5],[1., 2., 3., 0.5, .333],[1., 2., 3., 0.5, .333],[1., 2., 3., 0.5, .333],[1., 2., 0.5], [1., 2., 0.5]]
+
+def default_boxes(dilatations = dilatations , sizes = sizes , ech = ech):
+        default_boxes = []
+        for k in range(6):
+            for i in range(sizes[k]):
+                x = (i+0.5) / sizes[k]     
+                for j in range(sizes[k]): 
+                    y = (j+0.5) / sizes[k]
+                    for d in dilatations[k]:
+                        default_boxes.append([x, y, ech[k] * sqrt(d), ech[k] / sqrt(d)])
+                        if d == 1.:
+                            if k<5:
+                                default_boxes.append([x, y, sqrt(ech[k] * ech[k + 1]), sqrt(ech[k] * ech[k + 1])])
+                            else:
+                                default_boxes.append([x, y, 1, 1])
+
+        default_boxes = torch.Tensor(default_boxes).float().cuda()
+        default_boxes.clamp_(0, 1)
+
+        return default_boxes
+
+    
 
 class ObjectDetection_SSD(nn.Module):
   def __init__(self, nbr_classes = 1000): #Initialisation du système SSD
@@ -264,7 +287,7 @@ class ObjectDetection_SSD(nn.Module):
     self.cnn = vgg16(nbr_classes )  #Base du réseau VGG16, sans la partie Dense, renvoie la sortie de 2 layers
     self.box = BoxRegressionNet()  #Réseau de génération des rectangles (Regression)
     self.pred = ClassificationNet(nbr_classes) #Réseau de classification, renvoie les localisations des rectangles et les prédictions pour les nbr_classes classes pour chacun d'eux
-    self.prior_boxes = self.create_boxes().cuda()  
+    self.prior_boxes = default_boxes().cuda()  
     self.nbr_classes = nbr_classes
 
   def forward(self , x):
@@ -275,75 +298,6 @@ class ObjectDetection_SSD(nn.Module):
 
     return boxes , scores
 
-  def create_boxes(self):
-    
-      fmap_dims = {'conv4_3': 38,
-                     'conv7': 19,
-                     'conv8_2': 10,
-                     'conv9_2': 5,
-                     'conv10_2': 3,
-                     'conv11_2': 1}
-
-      obj_scales = {'conv4_3': 0.1,
-                      'conv7': 0.2,
-                      'conv8_2': 0.375,
-                      'conv9_2': 0.55,
-                      'conv10_2': 0.725,
-                      'conv11_2': 0.9}
-
-      aspect_ratios = {'conv4_3': [1., 2., 0.5],
-                         'conv7': [1., 2., 3., 0.5, .333],
-                         'conv8_2': [1., 2., 3., 0.5, .333],
-                         'conv9_2': [1., 2., 3., 0.5, .333],
-                         'conv10_2': [1., 2., 0.5],
-                         'conv11_2': [1., 2., 0.5]} 
-
-      fmaps = list(fmap_dims.keys())
-
-      prior_boxes = []
-
-      for k, fmap in enumerate(fmaps):
-          for i in range(fmap_dims[fmap]):
-              for j in range(fmap_dims[fmap]):
-                  cx = (j + 0.5) / fmap_dims[fmap]
-                  cy = (i + 0.5) / fmap_dims[fmap]
-
-                  for ratio in aspect_ratios[fmap]:
-                      prior_boxes.append([cx, cy, obj_scales[fmap] * sqrt(ratio), obj_scales[fmap] / sqrt(ratio)])
-                      if ratio == 1.:
-                          try:
-                              additional_scale = sqrt(obj_scales[fmap] * obj_scales[fmaps[k + 1]])
-                            # For the last feature map, there is no "next" feature map
-                          except IndexError:
-                              additional_scale = 1.
-                          prior_boxes.append([cx, cy, additional_scale, additional_scale])
-
-      prior_boxes = torch.FloatTensor(prior_boxes).cuda() 
-      prior_boxes.clamp_(0, 1) 
-
-      return prior_boxes
-  
-  def NMS_1(self , class_scores , decoded_locs , n_boxes, min_score): #On se débarrasse des prédictions avec un score n'atteignant pas un seuil choisi
-    res = class_scores
-    index = []
-    i = 0
-    j = 0
-    while(j < n_boxes):    
-      if res[i] < min_score :
-         res = torch.cat([res[:i] , res[i+1:]])
-         
-      else : 
-        i+=1
-        index.append(j)
-      j+=1
-    index = torch.LongTensor(index)
-    decoded_locs = decoded_locs[index] 
-
-    res, sort_ind = res.sort(dim=0, descending=True)
-    decoded_locs = decoded_locs[sort_ind]
-    
-
-    return res , decoded_locs
 
   def find_intersection(self , set_1, set_2):
     """
@@ -397,82 +351,9 @@ class ObjectDetection_SSD(nn.Module):
 
       return res
 
-  def NMS_2(self , n_boxes , iou , top_k ):
-
-    boxes = []
-    scores = []
-    labels = []
-    
-    is_Valid = torch.zeros(n_boxes).cuda()
-
-    for i in range(n_boxes):
-        if is_Valid[i] : 
-          continue
-          
-        is_Valid = torch.max(is_Valid, iou[box] > max_overlap)
-
-        is_Valid[i] = 0
-        boxes.append(class_decoded_locs[1 - isValid])
-        labels.append(torch.LongTensor((1 - isValid).sum().item() * [c]))
-        scores.append(class_scores[1 - isValid])
-    
-    if len(labels) == 0:
-       boxes.append(torch.FloatTensor([[0., 0., 1., 1.]]))
-       labels.append(torch.LongTensor([0]))
-       scores.append(torch.FloatTensor([0.]))
-
-    boxes = torch.cat(boxes, dim=0)  
-    labels = torch.cat(labels, dim=0) 
-    scores = torch.cat(scores, dim=0)  
-    n_objects = scores.size()[0]
-
-    if n_objects > top_k:
-      scores, sort_ind = scores.sort(dim=0, descending=True)
-      scores = scores[:top_k]  # (top_k)
-      boxes = boxes[sort_ind][:top_k]  # (top_k, 4)
-      labels = labels[sort_ind][:top_k]  # (top_k)
-
-    return boxes , scores , labels
-        
-
-  def detect_objects(self, predicted_locs, predicted_scores, min_score, max_overlap, top_k):
-
-    res_boxes = []
-    res_scores = []
-    res_labels = []
-
-    n = predicted_scores.size()[0] #Taille du batch
-    predicted_scores = F.softmax(predicted_scores, dim=2)
-
-    for k in tqdm(range(n)):#On parcourt le batch
-      decoded_locs = cxcy_to_xy(
-                gcxgcy_to_cxcy(predicted_locs[k], self.prior_boxes)) 
-      
-      boxes = []
-      scores = []
-      labels = []
-
-      max_scores, best_label = predicted_scores[k].max(dim=1)  #Liste de la taille du nombre de priors
-
-      for i in tqdm(range(self.nbr_classes)):
-        
-        class_scores = predicted_scores[k][:, i]
-
-        n_boxes = class_scores.size()[0]
-
-        class_scores , index = self.NMS_1(class_scores , decoded_locs , n_boxes , min_score)
-
-        n_boxes = class_scores.size()[0]
-
-        iou = self.find_jaccard_overlap(decoded_locs , decoded_locs)
-
-        boxes , scores , labels = self.NMS_2(n_boxes , iou , top_k)
+  
+  
  
-        res_boxes.append(boxes)
-        res_scores.append(scores)
-        res_labels.append(labels)
-
-    return res_boxes , res_scores , res_labels
 
 def find_jaccard_overlap(set_1, set_2):
     # Find intersections
@@ -496,11 +377,12 @@ def find_intersection(set_1, set_2):
     intersection_dims = torch.clamp(upper_bounds - lower_bounds, min=0)  # (n1, n2, 2)
     return intersection_dims[:, :, 0] * intersection_dims[:, :, 1]  # (n1, n2)
 
-class LossFunction(nn.Module):
-    """
-    La MultiBoxloss est notre loss d'apprentissage, elle est constitué d'une loss de localisation et d'une loss de classification.
-    """
+def cxcy_to_gcxgcy(cxcy, priors_cxcy):
+    return torch.cat([(cxcy[:, :2] - priors_cxcy[:, :2]) / (priors_cxcy[:, 2:] / 10),  # g_c_x, g_c_y
+                      torch.log(cxcy[:, 2:] / priors_cxcy[:, 2:]) * 5], 1)  # g_w, g_h
 
+class LossFunction(nn.Module):
+    
     def __init__(self, priors_cxcy, threshold=0.5, neg_pos_ratio=3, alpha=1.):
         
         super(LossFunction, self).__init__()
@@ -535,7 +417,7 @@ class LossFunction(nn.Module):
             if len(labels[i])==0:
                 boxes[i] = torch.FloatTensor([[0., 0., 1., 1.]]).cuda()
                 labels[i] = torch.LongTensor([0]).cuda()
-            print(labels[i])
+            #print(labels[i])
             if len(labels[i]) == 1:
                 print(labels[i][0])
                 #labels[i] = torch.tensor([0])
@@ -556,9 +438,15 @@ class LossFunction(nn.Module):
             # si le prior n'est pas suffisamment proche d'aucune boxe on le classifie comme ne contenant aucun objet
             prior_max_overlap_label = labels[i][prior_max_overlap_box] 
             prior_max_overlap_label[prior_max_overlap_value < self.threshold] = 0 
+            
+            #print('PRIOR' , (ground_truth_locs[i].float() == np.nan).sum())
 
             ground_truth_classes[i] = prior_max_overlap_label
+            #print('PRIOR',boxes[i][prior_max_overlap_box])
+            #print(boxes[i][prior_max_overlap_box])
+            #print(xy_to_cxcy(boxes[i][prior_max_overlap_box]))
             ground_truth_locs[i] = cxcy_to_gcxgcy(xy_to_cxcy(boxes[i][prior_max_overlap_box]), self.priors_cxcy) 
+            #print('LOCS' , xy_to_cxcy(boxes[i][prior_max_overlap_box]))
         ground_truth_locs.cuda()    
         ground_truth_classes.cuda()
             
@@ -569,9 +457,9 @@ class LossFunction(nn.Module):
         # LOCALIZATION LOSS
         
         L1_Loss = nn.L1Loss()
-        print('ICI' , predicted_locs[positive_priors].size() , ground_truth_locs[positive_priors].size())
         
         loc_loss = L1_Loss(predicted_locs[positive_priors], ground_truth_locs[positive_priors])
+        print('LOSS' , loc_loss)
         
         
 
