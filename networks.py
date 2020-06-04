@@ -318,7 +318,7 @@ class ObjectDetection_SSD(nn.Module):
                               additional_scale = 1.
                           prior_boxes.append([cx, cy, additional_scale, additional_scale])
 
-      prior_boxes = torch.FloatTensor(prior_boxes) 
+      prior_boxes = torch.FloatTensor(prior_boxes).cuda() 
       prior_boxes.clamp_(0, 1) 
 
       return prior_boxes
@@ -415,8 +415,8 @@ class ObjectDetection_SSD(nn.Module):
         boxes.append(class_decoded_locs[1 - isValid])
         labels.append(torch.LongTensor((1 - isValid).sum().item() * [c]))
         scores.append(class_scores[1 - isValid])
-        
-    if len(boxes) == 0:
+    
+    if len(labels) == 0:
        boxes.append(torch.FloatTensor([[0., 0., 1., 1.]]))
        labels.append(torch.LongTensor([0]))
        scores.append(torch.FloatTensor([0.]))
@@ -477,27 +477,22 @@ class ObjectDetection_SSD(nn.Module):
 def find_jaccard_overlap(set_1, set_2):
     # Find intersections
     intersection = find_intersection(set_1, set_2)# (n1, n2)
-    intersection.cpu()
+    intersection
 
     # Find areas of each box in both sets
     areas_set_1 = (set_1[:, 2] - set_1[:, 0]) * (set_1[:, 3] - set_1[:, 1])  # (n1)
     areas_set_2 = (set_2[:, 2] - set_2[:, 0]) * (set_2[:, 3] - set_2[:, 1])  # (n2)
     
-    areas_set_1.cpu()
-    areas_set_2.cpu()
-
     # Find the union
     # PyTorch auto-broadcasts singleton dimensions
-    union = (areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection).cpu()  # (n1, n2)
+    union = (areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection)  # (n1, n2)
 
     return intersection / union  # (n1, n2)
     
 def find_intersection(set_1, set_2):
-    set_1.cpu()
-    set_2.cpu()
     # PyTorch auto-broadcasts singleton dimensions
-    lower_bounds = torch.max(set_1[:, :2].cpu().unsqueeze(1), set_2[:, :2].cpu().unsqueeze(0))  # (n1, n2, 2)
-    upper_bounds = torch.min(set_1[:, 2:].unsqueeze(1), set_2[:, 2:].cpu().unsqueeze(0))  # (n1, n2, 2)
+    lower_bounds = torch.max(set_1[:, :2].unsqueeze(1), set_2[:, :2].unsqueeze(0))  # (n1, n2, 2)
+    upper_bounds = torch.min(set_1[:, 2:].unsqueeze(1), set_2[:, 2:].unsqueeze(0))  # (n1, n2, 2)
     intersection_dims = torch.clamp(upper_bounds - lower_bounds, min=0)  # (n1, n2, 2)
     return intersection_dims[:, :, 0] * intersection_dims[:, :, 1]  # (n1, n2)
 
@@ -516,7 +511,7 @@ class LossFunction(nn.Module):
         self.neg_pos_ratio = neg_pos_ratio
         self.alpha = alpha
 
-        self.l1Loss = nn.L1Loss()
+        self.L1Loss = nn.L1Loss()
         self.CELoss = nn.CrossEntropyLoss(reduce=False)
 
     def forward(self, predicted_locs, predicted_scores, boxes, labels):
@@ -526,17 +521,24 @@ class LossFunction(nn.Module):
         
         batch_size = predicted_locs.size(0)
         nbr_priors = self.priors_cxcy.size(0)
-        print('predicted_scores' , predicted_scores.size())
-        print('nbr_priors' , nbr_priors)
+        #print('predicted_scores' , predicted_scores.size())
+        #print('nbr_priors' , nbr_priors)
         nbr_classes = predicted_scores.size(2)
         
 
 
         ground_truth_locs = torch.zeros((batch_size, nbr_priors, 4)).float().cuda()  
         ground_truth_classes = torch.zeros((batch_size, nbr_priors)).cuda()
-        print(ground_truth_classes.size())
+        #print(ground_truth_classes.size())
 
         for i in range(batch_size):
+            if len(labels[i])==0:
+                boxes[i] = torch.FloatTensor([[0., 0., 1., 1.]]).cuda()
+                labels[i] = torch.LongTensor([0]).cuda()
+            print(labels[i])
+            if len(labels[i]) == 1:
+                print(labels[i][0])
+                #labels[i] = torch.tensor([0])
             nbr_boxes = boxes[i].size(0)
 
             overlap = find_jaccard_overlap(boxes[i], self.priors_xy)
@@ -547,7 +549,7 @@ class LossFunction(nn.Module):
             # on veut que chaque boxe soit associée a au moins un prior positif (IoU>=seuil)
             # on va donc pour chaque boxe choisir le prior qui lui correspond le plus et les associer avec un IoU arbitraire fixé au seuil  
             box_max_overlap_value, box_max_overlap_prior = overlap.max(dim=1)
-            prior_max_overlap_box[box_max_overlap_prior] = torch.LongTensor(range(nbr_boxes))
+            prior_max_overlap_box[box_max_overlap_prior] = torch.LongTensor(range(nbr_boxes)).cuda()
             prior_max_overlap_value[box_max_overlap_prior] = self.threshold
 
             # on associe a chaque prior le label de la boxe qui lui correspond
@@ -565,21 +567,26 @@ class LossFunction(nn.Module):
         positive_priors = ground_truth_classes != 0
 
         # LOCALIZATION LOSS
-
-        loc_loss = self.l1Loss(predicted_locs[positive_priors], ground_truth_locs[positive_priors])
+        
+        L1_Loss = nn.L1Loss()
+        print('ICI' , predicted_locs[positive_priors].size() , ground_truth_locs[positive_priors].size())
+        
+        loc_loss = L1_Loss(predicted_locs[positive_priors], ground_truth_locs[positive_priors])
+        
+        
 
         # CONFIDENCE LOSS
 
         nbr_positives = positive_priors.sum(dim=1)
         nbr_hard_negatives = self.neg_pos_ratio * nbr_positives
         
-        print(predicted_scores.view(-1, nbr_classes).size())
-        print(ground_truth_classes.view(-1).size())
+        #print(predicted_scores.view(-1, nbr_classes).size())
+        #print(ground_truth_classes.view(-1).size())
         
 
-        conf_loss_all = self.CELoss(predicted_scores.view(-1, nbr_classes).float().cuda(), ground_truth_classes.view(-1).long()).cuda()  
-        conf_loss_all = conf_loss_all.view(batch_size, nbr_priors).cpu()
-        print(positive_priors.size())
+        conf_loss_all = self.CELoss(predicted_scores.view(-1, nbr_classes).float(), ground_truth_classes.view(-1).long())  
+        conf_loss_all = conf_loss_all.view(batch_size, nbr_priors)
+        #print(positive_priors.size())
         
         
 
@@ -594,7 +601,11 @@ class LossFunction(nn.Module):
         conf_loss_hard_neg = conf_loss_neg[hard_negatives]
 
         conf_loss = (conf_loss_hard_neg.sum() + conf_loss_pos.sum()) / nbr_positives.sum()
-        conf_loss.cuda()
+      
+        
+       # print('conf loss' , conf_loss)
+        #print('loc loss' , loc_loss)
+        
 
         multiboxloss = conf_loss + self.alpha * loc_loss
 

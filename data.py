@@ -11,23 +11,25 @@ import csv
 
 
 
+
+
 class Dataset():
-    def __init__(self):
+    def __init__(self , coco):
         super(Dataset, self).__init__()
         self.resize = torchvision.transforms.Resize((300,300))
         self.topil = torchvision.transforms.ToPILImage()
         self.transform = torchvision.transforms.ToTensor()
         self.compose = torchvision.transforms.Compose([self.topil , self.resize , self.transform])
-        self.coco = torchvision.datasets.CocoDetection('data/train2014/' , 'data/annotations/instances_train2014.json' , transform= self.transform)
-
-
+        self.coco = coco
+        
     def get_boxes_labels(self , i):
         transform = torchvision.transforms.ToTensor()
-        coco = torchvision.datasets.CocoDetection('data/train2014/' , 'data/annotations/instances_train2014.json' , transform=transform)
-        n = coco.__len__()
+        
+        
+        n = self.coco.__len__()
         boxes = []
         labels = []
-        data = coco.__getitem__(i)
+        data = self.coco.__getitem__(i)
         m = len(data[1])
         img = data[0][:]
         p , w , h = img.size()
@@ -39,8 +41,10 @@ class Dataset():
             boxes.append(box)
             labels.append(label)
             
-        boxes = torch.tensor(boxes)
-        labels = torch.tensor(labels)
+            
+            
+        boxes = torch.tensor(boxes).cuda()
+        labels = torch.tensor(labels).cuda()
         return boxes , labels
     
     def __len__(self):
