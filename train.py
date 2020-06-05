@@ -1,6 +1,6 @@
 import time
 import torch.utils.data
-from networks import ObjectDetection_SSD, LossFunction, default_boxes
+from networks import ObjectDetection_SSD, LossFunction, default_boxes, undeviate, IOUs
 from data import DataLoader , Dataset
 import argparse
 import os 
@@ -14,10 +14,10 @@ from visualization import board_add_image, board_add_images
 def get_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default = "SSD300")
-    parser.add_argument("--batch_size", default = 8)
+    parser.add_argument("--batch_size", default = 20)
     parser.add_argument("--nb_epochs" , default = 10000)
     parser.add_argument("--lr" , default = 0.0001)
-    parser.add_argument("--display_count" , default = 5)
+    parser.add_argument("--display_count" , default = 100)
     parser.add_argument("--nbr_classes" , default = 91)
     parser.add_argument("--checkpoint" , default = 5000)
     parser.add_argument("--checkpoint_dir" , default = 'checkpoints')
@@ -33,10 +33,6 @@ totensor = torchvision.transforms.ToTensor()
 
     
 def IoU(rect1,rect2):
-  """ 
-  Renvoie un float avec le IoU entre rect1 et rect2 :
-  rect1, rect2 : quadruplets (x,y,w,h) 
-  """
   x1,y1,w1,h1 = rect1
   x2,y2,w2,h2 = rect2
   xA,yA = max(x1,x2),max(y1,y2)
@@ -45,12 +41,16 @@ def IoU(rect1,rect2):
   union = w1*h1 + w2*h2 - inter
   return inter/union
 
-def get_labeled_boxes(predicted_boxes , predicted_scores ,threshold=.5,iou=0.4):
+def get_labeled_boxes(predicted_boxes , predicted_scores , box , threshold=.5,iou=0.5, ioug = 0.3):
     boxes = [] 
     scores = []
     labels = []
     rects = predicted_boxes
     preds = predicted_scores
+    print('SIZE' , rects.size() , box.size())
+    ious = IOUs(box, rects)
+    db_max_ious_value, db_max_ious_box = ious.max(dim=0)
+    rects = rects[db_max_ious_box[db_max_ious_value > ioug]]
     n = len(rects)
     for i in range(n) : 
         cx , cy , w , h = rects[i]*300
@@ -137,6 +137,7 @@ def train(model , opt , train_loader , board):
 
         predicted_boxes , predicted_scores = model(img)
         
+        
         loss = criterion(predicted_boxes , predicted_scores , boxes , labels)
         #print('LOSS' , loss.item())
         optimizer.zero_grad()
@@ -165,13 +166,14 @@ def train(model , opt , train_loader , board):
             #image_1 = show_objs(img_1 , boxes_1 , scores_1 , labels_1).squeeze()
                 
             #print(image_1.size())
+            predicted_boxes[0] = undeviate(predicted_boxes[0] , box)
             
-            boxes , scores , labels = get_labeled_boxes(predicted_boxes[0] , predicted_scores[0] , threshold = 0.5,iou=0.5)    
+            boxes , scores , labels = get_labeled_boxes(predicted_boxes[0] , predicted_scores[0] , boxes[0],threshold = 0.5,iou=0.5)    
             image , imOut = showrects(img[0] , boxes)   
             
             board_add_image(board, 'combine',image, epoch+1)
             string = 'images/step' + str(epoch) + 'jpg'
-            cv2.imwrite('test.jpg' , imOut)
+            cv2.imwrite("train_res/test{0}.jpg".format(epoch) , imOut)
             
             t = time.time() - iter_start_time
             print('step: %8d, time: %.3f, loss: %4f' % (epoch+1, t, loss.item()), flush=True)

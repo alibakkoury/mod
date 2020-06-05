@@ -25,6 +25,10 @@ model_urls = {
     'vgg16_bn' : 'https://download.pytorch.org/models/vgg16_bn-6c64b313.pth'
 }
 
+sizes = [38 , 19 , 10 , 5 , 3 , 1] 
+ech = [0.1 , 0.2 , 0.375 , 0.55 , 0.725 , 0.9] 
+dilatations = [[1., 2., 0.5],[1., 2., 3., 0.5, .333],[1., 2., 3., 0.5, .333],[1., 2., 3., 0.5, .333],[1., 2., 0.5], [1., 2., 0.5]]
+
 
 
 
@@ -123,6 +127,19 @@ def vgg16(num_classes, pretrained=False, **kwargs):
         model.load_state_dict(model_zoo.load_url(model_urls['vgg16_bn']))
     model.classifier = vgg_16_classifier(num_classes)
     return model
+
+def IOUs(set_1, set_2):
+        lower_bounds = torch.max(set_1[:, :2].unsqueeze(1), set_2[:, :2].unsqueeze(0))  
+        upper_bounds = torch.min(set_1[:, 2:].unsqueeze(1), set_2[:, 2:].unsqueeze(0))  
+        intersection_dims = torch.clamp(upper_bounds - lower_bounds, min=0)
+        intersection = intersection_dims[:, :, 0] * intersection_dims[:, :, 1]
+        #print(intersection)
+        areas_set_1 = (set_1[:, 2] - set_1[:, 0]) * (set_1[:, 3] - set_1[:, 1])  
+        areas_set_2 = (set_2[:, 2] - set_2[:, 0]) * (set_2[:, 3] - set_2[:, 1])  
+        union = (areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection)  
+
+        return intersection / union 
+
 
 class BoxRegressionNet(nn.Module):
 
@@ -231,37 +248,41 @@ class ClassificationNet(nn.Module):
             return loc, cla    
 
 
-def xy_to_cxcy(xy):
-    """
-    Convert bounding boxes from boundary coordinates (x_min, y_min, x_max, y_max) to center-size coordinates (c_x, c_y, w, h).
-    :param xy: bounding boxes in boundary coordinates, a tensor of size (n_boxes, 4)
-    :return: bounding boxes in center-size coordinates, a tensor of size (n_boxes, 4)
-    """
-    return torch.cat([xy[:, :2] + xy[:, 2:] / 2,  # c_x, c_y
-                      xy[:, 2:]], 1)  # w, h
+def center(rect):
+    s= rect.size()[0]
+    x_min , y_min , w , h = rect[:,0].view((s,1)) , rect[:,1].view((s,1)), rect[:,2].view((s,1)) ,  rect[:,3].view((s,1))
+    return torch.cat([(x_min + w) / 2, (y_min + h)/2, w , h ], 1) 
 
 
-def cxcy_to_xy(cxcy):
-    return torch.cat([cxcy[:, :2] - (cxcy[:, 2:] / 2),  # x_min, y_min
-                      cxcy[:, :2] + (cxcy[:, 2:] / 2)], 1)  # x_max, y_max
+def uncenter(rect):
+    s= rect.size()[0]
+    print(rect.size())
+    x , y , w , h = rect[:,0].view((s,1)) , rect[:,1].view((s,1)) , rect[:,2].view((s,1)) , rect[:,3].view((s,1))
+    print(x.size())
+    return torch.cat([x - w / 2, y - h /2, w, h], dim = 1) 
+      
+
+def deviate(rect , default_boxes):
+    s= rect.size()[0]
+    x , y , w , h = rect[:,0].view((s,1)) , rect[:,1].view((s,1)) , rect[:,2].view((s,1)) , rect[:,3].view((s,1))
+    x_d , y_d , w_d , h_d = default_boxes[:,0].view((s,1)) , default_boxes[:,1].view((s,1)) , default_boxes[:,2].view((s,1)) , default_boxes[:,3].view((s,1))
+    return torch.cat([(x - x_d) / w_d , (y - y_d )/ h_d , torch.log(w / w_d ) , torch.log(h/h_d)], 1)  
 
 
+def undeviate(rect , default_boxes):
+    s= rect.size()[0]
+    x , y , w , h = rect[:,0].view((s,1)) , rect[:,1].view((s,1)) , rect[:,2].view((s,1)) , rect[:,3].view((s,1))
+    x_d , y_d , w_d , h_d = default_boxes[:,0].view((s,1)) , default_boxes[:,1].view((s,1)) , default_boxes[:,2].view((s,1)) , default_boxes[:,3].view((s,1))
+    return torch.cat([x * w_d  + x_d,y*h_d + y_d ,  torch.exp(w) * w_d , torch.exp(h)*h_d], 1)  
 
 
-def gcxgcy_to_cxcy(gcxgcy, priors_cxcy):
-    return torch.cat([gcxgcy[:, :2] * priors_cxcy[:, 2:] / 10 + priors_cxcy[:, :2],  # c_x, c_y
-                      torch.exp(gcxgcy[:, 2:] / 5) * priors_cxcy[:, 2:]], 1)  # w, h
-
-
-sizes = [38 , 19 , 10 , 5 , 3 , 1]
-ech = [0.1 , 0.2 , 0.375 , 0.55 , 0.725 , 0.9]
-dilatations = [[1., 2., 0.5],[1., 2., 3., 0.5, .333],[1., 2., 3., 0.5, .333],[1., 2., 3., 0.5, .333],[1., 2., 0.5], [1., 2., 0.5]]
 
 def default_boxes(dilatations = dilatations , sizes = sizes , ech = ech):
         default_boxes = []
         for k in range(6):
             for i in range(sizes[k]):
-                x = (i+0.5) / sizes[k]     
+                x = (i+0.5) / sizes[k]
+                #print(x)
                 for j in range(sizes[k]): 
                     y = (j+0.5) / sizes[k]
                     for d in dilatations[k]:
@@ -274,7 +295,7 @@ def default_boxes(dilatations = dilatations , sizes = sizes , ech = ech):
 
         default_boxes = torch.Tensor(default_boxes).float().cuda()
         default_boxes.clamp_(0, 1)
-
+        print(default_boxes.size())
         return default_boxes
 
     
@@ -287,8 +308,6 @@ class ObjectDetection_SSD(nn.Module):
     self.cnn = vgg16(nbr_classes )  #Base du réseau VGG16, sans la partie Dense, renvoie la sortie de 2 layers
     self.box = BoxRegressionNet()  #Réseau de génération des rectangles (Regression)
     self.pred = ClassificationNet(nbr_classes) #Réseau de classification, renvoie les localisations des rectangles et les prédictions pour les nbr_classes classes pour chacun d'eux
-    self.prior_boxes = default_boxes().cuda()  
-    self.nbr_classes = nbr_classes
 
   def forward(self , x):
 
@@ -299,203 +318,88 @@ class ObjectDetection_SSD(nn.Module):
     return boxes , scores
 
 
-  def find_intersection(self , set_1, set_2):
-    """
-    Find the intersection of every box combination between two sets of boxes that are in boundary coordinates.
-    :param set_1: set 1, a tensor of dimensions (n1, 4)
-    :param set_2: set 2, a tensor of dimensions (n2, 4)
-    :return: intersection of each of the boxes in set 1 with respect to each of the boxes in set 2, a tensor of dimensions (n1, n2)
-    """
 
-    # PyTorch auto-broadcasts singleton dimensions
-    lower_bounds = torch.max(set_1[:, :2].unsqueeze(1), set_2[:, :2].unsqueeze(0))  # (n1, n2, 2)
-    upper_bounds = torch.min(set_1[:, 2:].unsqueeze(1), set_2[:, 2:].unsqueeze(0))  # (n1, n2, 2)
-    intersection_dims = torch.clamp(upper_bounds - lower_bounds, min=0)  # (n1, n2, 2)
-    return intersection_dims[:, :, 0] * intersection_dims[:, :, 1]  # (n1, n2)
-
-
-  def find_jaccard_overlap(self , set_1, set_2):
-
-    # Find intersections
-    intersection = self.find_intersection(set_1, set_2)  # (n1, n2)
-
-    # Find areas of each box in both sets
-    areas_set_1 = (set_1[:, 2] - set_1[:, 0]) * (set_1[:, 3] - set_1[:, 1])  # (n1)
-    areas_set_2 = (set_2[:, 2] - set_2[:, 0]) * (set_2[:, 3] - set_2[:, 1])  # (n2)
-
-    # Find the union
-    # PyTorch auto-broadcasts singleton dimensions
-    union = areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection  # (n1, n2)
-
-    return intersection / union  # (n1, n2)
-
-
-  def IoU(self , t1 , t2):
-
-      def IoU_rect(rect1,rect2): #On calcule le IoU entre 2 rectangles : 
-          x1,y1,w1,h1 = tuple(rect1.tolist())
-          x2,y2,w2,h2 = tuple(rect2.tolist())
-          xA,yA = max(x1,x2),max(y1,y2)
-          xB,yB = min(x1+w1,x2+w2),min(y1+h1,y2+h2)
-          inter = max(0,xB - xA)*max(0,yB-yA)
-          union = w1*h1 + w2*h2 - inter
-          return inter/union
-
-      n1 = t1.size()[0]
-      n2 = t2.size()[0]  
-      res = torch.zeros((n1 , n2))
-
-      for i in tqdm(range(n1)):
-        for j in tqdm(range(n2)):
-          res[i,j] = IoU_rect(t1[i] , t2[j])
-
-      return res
-
-  
-  
- 
-
-def find_jaccard_overlap(set_1, set_2):
-    # Find intersections
-    intersection = find_intersection(set_1, set_2)# (n1, n2)
-    intersection
-
-    # Find areas of each box in both sets
-    areas_set_1 = (set_1[:, 2] - set_1[:, 0]) * (set_1[:, 3] - set_1[:, 1])  # (n1)
-    areas_set_2 = (set_2[:, 2] - set_2[:, 0]) * (set_2[:, 3] - set_2[:, 1])  # (n2)
-    
-    # Find the union
-    # PyTorch auto-broadcasts singleton dimensions
-    union = (areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection)  # (n1, n2)
-
-    return intersection / union  # (n1, n2)
-    
-def find_intersection(set_1, set_2):
-    # PyTorch auto-broadcasts singleton dimensions
-    lower_bounds = torch.max(set_1[:, :2].unsqueeze(1), set_2[:, :2].unsqueeze(0))  # (n1, n2, 2)
-    upper_bounds = torch.min(set_1[:, 2:].unsqueeze(1), set_2[:, 2:].unsqueeze(0))  # (n1, n2, 2)
-    intersection_dims = torch.clamp(upper_bounds - lower_bounds, min=0)  # (n1, n2, 2)
-    return intersection_dims[:, :, 0] * intersection_dims[:, :, 1]  # (n1, n2)
-
-def cxcy_to_gcxgcy(cxcy, priors_cxcy):
-    return torch.cat([(cxcy[:, :2] - priors_cxcy[:, :2]) / (priors_cxcy[:, 2:] / 10),  # g_c_x, g_c_y
-                      torch.log(cxcy[:, 2:] / priors_cxcy[:, 2:]) * 5], 1)  # g_w, g_h
 
 class LossFunction(nn.Module):
     
-    def __init__(self, priors_cxcy, threshold=0.5, neg_pos_ratio=3, alpha=1.):
+    def __init__(self, default_boxes, threshold=0.5, ratio =3, alpha=1.):
         
         super(LossFunction, self).__init__()
         
-        self.priors_cxcy = priors_cxcy
-        self.priors_xy = cxcy_to_xy(priors_cxcy)
+        
         self.threshold = threshold
-        self.neg_pos_ratio = neg_pos_ratio
+        self.ratio = ratio
         self.alpha = alpha
+        self.default_boxes = default_boxes
+        self.uncentered_default = uncenter(default_boxes)
 
         self.L1Loss = nn.L1Loss()
         self.CELoss = nn.CrossEntropyLoss(reduce=False)
-
-    def forward(self, predicted_locs, predicted_scores, boxes, labels):
         
+
+    def forward(self, predicted_boxes, predicted_labels, boxes, labels):      
         #boxes = list(boxes)
         #labels = list(labels)
-        
-        batch_size = predicted_locs.size(0)
-        nbr_priors = self.priors_cxcy.size(0)
+        batch_size = predicted_boxes.size(0)
+        nbr_default = self.default_boxes.size(0)
         #print('predicted_scores' , predicted_scores.size())
-        #print('nbr_priors' , nbr_priors)
-        nbr_classes = predicted_scores.size(2)
-        
-
-
-        ground_truth_locs = torch.zeros((batch_size, nbr_priors, 4)).float().cuda()  
-        ground_truth_classes = torch.zeros((batch_size, nbr_priors)).cuda()
+        ground_truth_boxes = torch.zeros((batch_size, nbr_default, 4)).float().cuda()  
+        ground_truth_classes = torch.zeros((batch_size, nbr_default)).cuda()
         #print(ground_truth_classes.size())
-
         for i in range(batch_size):
             if len(labels[i])==0:
-                boxes[i] = torch.FloatTensor([[0., 0., 1., 1.]]).cuda()
-                labels[i] = torch.LongTensor([0]).cuda()
+                boxes[i] = torch.Tensor([[0., 0., 1., 1.]]).float().cuda()
+                labels[i] = torch.Tensor([0]).cuda()
             #print(labels[i])
             if len(labels[i]) == 1:
                 print(labels[i][0])
                 #labels[i] = torch.tensor([0])
+                
             nbr_boxes = boxes[i].size(0)
-
-            overlap = find_jaccard_overlap(boxes[i], self.priors_xy)
-
-            # on identifie pour chaque prior la boxe qui lui correspond le plus
-            prior_max_overlap_value, prior_max_overlap_box = overlap.max(dim=0)
-
-            # on veut que chaque boxe soit associée a au moins un prior positif (IoU>=seuil)
-            # on va donc pour chaque boxe choisir le prior qui lui correspond le plus et les associer avec un IoU arbitraire fixé au seuil  
-            box_max_overlap_value, box_max_overlap_prior = overlap.max(dim=1)
-            prior_max_overlap_box[box_max_overlap_prior] = torch.LongTensor(range(nbr_boxes)).cuda()
-            prior_max_overlap_value[box_max_overlap_prior] = self.threshold
-
-            # on associe a chaque prior le label de la boxe qui lui correspond
-            # si le prior n'est pas suffisamment proche d'aucune boxe on le classifie comme ne contenant aucun objet
-            prior_max_overlap_label = labels[i][prior_max_overlap_box] 
-            prior_max_overlap_label[prior_max_overlap_value < self.threshold] = 0 
             
-            #print('PRIOR' , (ground_truth_locs[i].float() == np.nan).sum())
-
-            ground_truth_classes[i] = prior_max_overlap_label
-            #print('PRIOR',boxes[i][prior_max_overlap_box])
-            #print(boxes[i][prior_max_overlap_box])
-            #print(xy_to_cxcy(boxes[i][prior_max_overlap_box]))
-            ground_truth_locs[i] = cxcy_to_gcxgcy(xy_to_cxcy(boxes[i][prior_max_overlap_box]), self.priors_cxcy) 
-            #print('LOCS' , xy_to_cxcy(boxes[i][prior_max_overlap_box]))
-        ground_truth_locs.cuda()    
-        ground_truth_classes.cuda()
+            ious = IOUs(boxes[i], self.uncentered_default)
+            db_max_ious_value, db_max_ious_box = ious.max(dim=0)
+            box_max_ious_value, box_max_ious_db = ious.max(dim=1)
+            db_max_ious_box[box_max_ious_db] = torch.LongTensor(range(nbr_boxes)).cuda()
+            db_max_ious_value[box_max_ious_db] = self.threshold
+            db_max_ious_label = labels[i][db_max_ious_box] 
+            db_max_ious_label[db_max_ious_value < self.threshold] = 0 
             
-        
-
-        positive_priors = ground_truth_classes != 0
-
-        # LOCALIZATION LOSS
-        
+            #print('DB' , (ground_truth_locs[i].float() == np.nan).sum())
+            ground_truth_classes[i] = db_max_ious_label
+            ground_truth_boxes[i] = deviate(center(boxes[i][db_max_ious_box]), self.default_boxes) 
+            
+        ground_truth_boxes.cuda()    
+        ground_truth_classes.cuda()  
         L1_Loss = nn.L1Loss()
+        positive_db = ground_truth_classes != 0
+        box_loss = L1_Loss(predicted_boxes[positive_db], ground_truth_boxes[positive_db])
+        #print('LOSS' , box_loss)
+        nbr_classes = predicted_labels.size(2)
+        nbr_positives = positive_db.sum(dim=1)
+        #print(predicted_labels.view(-1, nbr_classes).size())
         
-        loc_loss = L1_Loss(predicted_locs[positive_priors], ground_truth_locs[positive_priors])
-        print('LOSS' , loc_loss)
         
-        
-
-        # CONFIDENCE LOSS
-
-        nbr_positives = positive_priors.sum(dim=1)
-        nbr_hard_negatives = self.neg_pos_ratio * nbr_positives
-        
-        #print(predicted_scores.view(-1, nbr_classes).size())
         #print(ground_truth_classes.view(-1).size())
-        
+        closs = self.CELoss(predicted_labels.view(-1, nbr_classes).float(), ground_truth_classes.view(-1).long())  
+        closs = closs.view(batch_size, nbr_default)
+        #print(positive_db.size())
+        #print('done')
+        positive_closs = closs[positive_db]
+        neg_closs = closs.clone()  
+        neg_closs[positive_db] = 0.
+        neg_closs, _ = neg_closs.sort(dim=1, descending=True)
 
-        conf_loss_all = self.CELoss(predicted_scores.view(-1, nbr_classes).float(), ground_truth_classes.view(-1).long())  
-        conf_loss_all = conf_loss_all.view(batch_size, nbr_priors)
-        #print(positive_priors.size())
-        
-        
+        hardness_ranks = torch.Tensor(range(nbr_default)).unsqueeze(0).expand_as(neg_closs).cuda()
+        hard_negatives = hardness_ranks < self.ratio * nbr_positives.unsqueeze(1)
+        hardneg_closs = neg_closs[hard_negatives]
 
-        conf_loss_pos = conf_loss_all[positive_priors]
-
-        conf_loss_neg = conf_loss_all.clone()  
-        conf_loss_neg[positive_priors] = 0.
-        conf_loss_neg, _ = conf_loss_neg.sort(dim=1, descending=True)
-
-        hardness_ranks = torch.Tensor(range(nbr_priors)).unsqueeze(0).expand_as(conf_loss_neg).cuda()
-        hard_negatives = hardness_ranks < nbr_hard_negatives.unsqueeze(1)
-        conf_loss_hard_neg = conf_loss_neg[hard_negatives]
-
-        conf_loss = (conf_loss_hard_neg.sum() + conf_loss_pos.sum()) / nbr_positives.sum()
-      
-        
+        closs = (hardneg_closs.sum() + positive_closs.sum()) / nbr_positives.sum()
        # print('conf loss' , conf_loss)
         #print('loc loss' , loc_loss)
         
+        loss = closs + self.alpha * box_loss
 
-        multiboxloss = conf_loss + self.alpha * loc_loss
+        return loss
 
-        return multiboxloss
-
+    
