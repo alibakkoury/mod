@@ -7,6 +7,7 @@ import os
 import torchvision
 import cv2
 import numpy as np
+from PIL import Image
 
 from tensorboardX import SummaryWriter
 from visualization import board_add_image, board_add_images
@@ -15,12 +16,12 @@ def get_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default = "SSD300")
     parser.add_argument("--batch_size", default = 20)
-    parser.add_argument("--nb_epochs" , default = 10000)
+    parser.add_argument("--nb_epochs" , default = 50000)
     parser.add_argument("--lr" , default = 0.0001)
     parser.add_argument("--display_count" , default = 100)
     parser.add_argument("--nbr_classes" , default = 91)
-    parser.add_argument("--checkpoint" , default = 5000)
-    parser.add_argument("--checkpoint_dir" , default = 'checkpoints')
+    parser.add_argument("--checkpoint" , default = 1000)
+    parser.add_argument("--checkpoint_dir" , default = 'checkpoints/')
     parser.add_argument("--traindata_dir" , default = 'data/train/')
     
     opt = parser.parse_args()
@@ -47,7 +48,7 @@ def get_labeled_boxes(predicted_boxes , predicted_scores , box , threshold=.5,io
     labels = []
     rects = predicted_boxes
     preds = predicted_scores
-    print('SIZE' , rects.size() , box.size())
+    #print('SIZE' , rects.size() , box.size())
     ious = IOUs(box, rects)
     db_max_ious_value, db_max_ious_box = ious.max(dim=0)
     rects = rects[db_max_ious_box[db_max_ious_value > ioug]]
@@ -72,16 +73,20 @@ def get_labeled_boxes(predicted_boxes , predicted_scores , box , threshold=.5,io
 def showrects(img,rects,maxRect=3000):
     imag = img.cpu()
     imag = topil(imag)
-    print(imag.size)
+    #print(imag.size)
     imOut = cv2.cvtColor(np.float32(imag),cv2.COLOR_RGB2BGR)
+    #imOut = np.float32(imag)
+    #print(rects.size())
     for i,rect in enumerate(rects):
         if (i < maxRect):
-            x, y, w, h = rect
+            x, y, w, h = rect*300
             cv2.rectangle(imOut, (int(x), int(y)), (int(x+w), int(y+h)), (0, 0, 255), 2, cv2.LINE_AA)
     
-    image = imOut
-    imOut = totensor(imOut).view((1,3,300,300))
-    print("Done")
+    #image = imOut
+    image = cv2.cvtColor(np.float32(imOut),cv2.COLOR_BGR2RGB)
+    #image = Image.fromarray(image)
+    image = totensor(imOut).view((1,3,300,300))
+    #print("Done")
     return imOut , image
 
 
@@ -145,19 +150,18 @@ def train(model , opt , train_loader , board):
         optimizer.step()
         
         
-        print('epoch done')
+        #print('epoch done')
 
         if (epoch+1) % opt.display_count == 0:
             t = time.time() - iter_start_time
             print('step: %8d, time: %.3f, loss: %4f' % (epoch+1, t, loss.item()), flush=True)
 
         if (epoch+1) % opt.checkpoint == 0:
-            torch.save(model.cpu().state_dict(), opt.checkpoint_dir)
+            torch.save(model.cpu().state_dict(), opt.checkpoint_dir + 'check.pth')
             model.cuda()
        
         if (epoch+1) % opt.display_count == 0:
             board.add_scalar('metric', loss.item(), epoch+1)
-            
             #image = img[0] 
             #box = boxes[0]
             #score = scores[0]
@@ -166,14 +170,33 @@ def train(model , opt , train_loader , board):
             #image_1 = show_objs(img_1 , boxes_1 , scores_1 , labels_1).squeeze()
                 
             #print(image_1.size())
-            predicted_boxes[0] = undeviate(predicted_boxes[0] , box)
+            #predicted_boxes[0] = undeviate(predicted_boxes[0] , box)
+
+            n_batch = predicted_scores.size(0)
+
+            n_b , m_b = predicted_boxes[0].size()
             
-            boxes , scores , labels = get_labeled_boxes(predicted_boxes[0] , predicted_scores[0] , boxes[0],threshold = 0.5,iou=0.5)    
-            image , imOut = showrects(img[0] , boxes)   
-            
-            board_add_image(board, 'combine',image, epoch+1)
+            #n_s , m_s = predicted_scores[0].size()
+         
+            boxes , labels , scores = model.detect_objects(predicted_boxes , predicted_scores , 0.1 , 0.45 , 5)
+
+            images = []
+            imOuts = []
+            for i in range(n_batch) :
+                #print(box[0].size())
+                box  = boxes[i]
+                imOut , image = showrects(img[i] , box) 
+                #image = image.unsqueeze(0)
+                images.append(image)
+                imOuts.append(imOut)
+            print(images[0].size())
+
+            images = torch.cat(images , dim = 0)
+            print(images.size())
+        
+            board_add_image(board, 'combine', images, epoch+1)
             string = 'images/step' + str(epoch) + 'jpg'
-            cv2.imwrite("train_res/test{0}.jpg".format(epoch) , imOut)
+            cv2.imwrite("train_res/test{0}.jpg".format(epoch+1) , imOuts[0])
             
             t = time.time() - iter_start_time
             print('step: %8d, time: %.3f, loss: %4f' % (epoch+1, t, loss.item()), flush=True)
@@ -192,11 +215,20 @@ def main():
     if not os.path.exists('tensorboard'):
         os.makedirs('tensorboard')
     board = SummaryWriter(log_dir = os.path.join('tensorboard', 'SSD'))
+
+    if not os.path.exists('checkpoints'):
+               os.makedirs('checkpoints')
+    
+    if not os.path.exists('train_res'):
+               os.makedirs('train_res')
     
     train_dataset = Dataset(coco)
     train_loader = DataLoader(opt, train_dataset)
 
     model = ObjectDetection_SSD(nbr_classes = opt.nbr_classes)
+
+    #if os.path.exists("check.pth"):
+     #  model.load_state_dict(torch.load("check.pth"))
     
     start = time.time()
 
