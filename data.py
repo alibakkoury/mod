@@ -32,7 +32,7 @@ class Dataset():
         data = self.coco.__getitem__(i)
         m = len(data[1])
         img = data[0][:]
-        print(img.size())
+        #print(img.size())
         p , w , h = img.size()
         t = torch.tensor([1/h , 1/w , 1/h , 1/w])
         for k in range(m):
